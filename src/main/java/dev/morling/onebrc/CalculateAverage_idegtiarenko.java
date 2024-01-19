@@ -1,11 +1,14 @@
 package dev.morling.onebrc;
 
 import java.io.BufferedInputStream;
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.HashMap;
+import java.io.UncheckedIOException;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.IntStream;
 
 public class CalculateAverage_idegtiarenko {
 
@@ -13,19 +16,33 @@ public class CalculateAverage_idegtiarenko {
 
     public static void main(String[] args) throws IOException {
 
-        var measurements = new HashMap<String, Aggregator>(1024);
+        var size = new File(FILE).length();
+        var chunks = Runtime.getRuntime().availableProcessors();
+        var chunkSize = size / chunks;
 
-        try (var is = new ChunkedInputStream(new BufferedInputStream(new FileInputStream(FILE), 10 * 1024 * 1024))) {
-            Aggregator[] aggregation = new Aggregator[1];
-            while (is.available()) {
-                is.readUpTo((byte) ';', (data, from, to) -> {
-                    aggregation[0] = measurements.computeIfAbsent(new String(data, from, to - from), ignored -> new Aggregator());
-                });
-                is.readUpTo((byte) '\n', (data, from, to) -> {
-                    aggregation[0].add(parse(data, from, to));
-                });
+        var measurements = new ConcurrentHashMap<String, Aggregator>(1024);
+
+        IntStream.range(0, chunks).parallel().forEach(chunk -> {
+            try (var is = new ChunkedInputStream(new BufferedInputStream(new FileInputStream(FILE), 10 * 1024 * 1024))) {
+                is.setRange(chunk * chunkSize, (chunk + 1) * chunkSize);
+                if (chunk != 0) {
+                    is.readUpTo((byte) '\n', (data, from, to) -> {
+                        // skip to the first starting position
+                    });
+                }
+                Aggregator[] aggregation = new Aggregator[1];
+                while (is.available()) {
+                    is.readUpTo((byte) ';', (data, from, to) -> {
+                        aggregation[0] = measurements.computeIfAbsent(new String(data, from, to - from), ignored -> new Aggregator());
+                    });
+                    is.readUpTo((byte) '\n', (data, from, to) -> {
+                        aggregation[0].add(parse(data, from, to));
+                    });
+                }
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
             }
-        }
+        });
 
         System.out.println(new TreeMap<>(measurements));
     }
@@ -65,6 +82,7 @@ public class CalculateAverage_idegtiarenko {
         private long offset = 0;
         private int size = 0;
         private long position;
+        private long limit = Long.MAX_VALUE;
 
         private boolean available = true;
 
@@ -72,8 +90,15 @@ public class CalculateAverage_idegtiarenko {
             this.is = is;
         }
 
+        public void setRange(long from, long to) throws IOException {
+            is.skip(from);
+            offset = from;
+            position = from;
+            limit = to;
+        }
+
         public boolean available() {
-            return available;
+            return available && position < limit;
         }
 
         private byte[] buffer() {
@@ -139,7 +164,7 @@ public class CalculateAverage_idegtiarenko {
         private long sum = 0;
         private int total = 0;
 
-        public void add(int value) {
+        public synchronized void add(int value) {
             if (value < min) {
                 min = value;
             }
