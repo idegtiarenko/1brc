@@ -1,10 +1,9 @@
 package dev.morling.onebrc;
 
 import java.io.BufferedInputStream;
-import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.InputStream;
 import java.util.HashMap;
 import java.util.TreeMap;
 
@@ -14,28 +13,133 @@ public class CalculateAverage_idegtiarenko {
 
     public static void main(String[] args) throws IOException {
 
-        var measurements = new HashMap<String, Aggregator>(1000);
+        var measurements = new HashMap<String, Aggregator>(1024);
 
-        try (var reader = new BufferedReader(new InputStreamReader(new BufferedInputStream(new FileInputStream(FILE), 10 * 1024 * 1024)))) {
-            String line = null;
-            while ((line = reader.readLine()) != null) {
-                int split = line.lastIndexOf(';');
-                var station = line.substring(0, split);
-                var value = Double.parseDouble(line.substring(split + 1));
-                measurements.computeIfAbsent(station, k -> new Aggregator()).add(value);
+        try (var is = new ChunkedInputStream(new BufferedInputStream(new FileInputStream(FILE), 10 * 1024 * 1024))) {
+            Aggregator[] aggregation = new Aggregator[1];
+            while (is.available()) {
+                is.readUpTo((byte) ';', (data, from, to) -> {
+                    aggregation[0] = measurements.computeIfAbsent(new String(data, from, to - from), ignored -> new Aggregator());
+                });
+                is.readUpTo((byte) '\n', (data, from, to) -> {
+                    aggregation[0].add(parse(data, from, to));
+                });
             }
         }
 
         System.out.println(new TreeMap<>(measurements));
     }
 
+    private static int parse(byte[] data, int from, int to) {
+        boolean negative = false;
+        int p = from;
+        int value = 0;
+        if (data[from] == (byte) '-') {
+            p++;
+            negative = true;
+        }
+        while (p < to) {
+            if (data[p] != '.') {
+                value = 10 * value + (data[p] - (byte) '0');
+            }
+            p++;
+        }
+        return negative ? -value : value;
+    }
+
+    private static int toInt(long value) {
+        return (int) value;
+    }
+
+    private static final class ChunkedInputStream implements AutoCloseable {
+
+        private static final int BUFFER_SIZE = 1024*1024;
+
+        private final InputStream is;
+
+        private final byte[] b2 = new byte[BUFFER_SIZE];
+        private final byte[] b1 = new byte[BUFFER_SIZE];
+
+        private boolean buf = false;
+
+        private long offset = 0;
+        private int size = 0;
+        private long position;
+
+        private boolean available = true;
+
+        public ChunkedInputStream(InputStream is) {
+            this.is = is;
+        }
+
+        public boolean available() {
+            return available;
+        }
+
+        private byte[] buffer() {
+            return buf ? b1 : b2;
+        }
+
+        private byte[] previous() {
+            return !buf ? b1 : b2;
+        }
+
+        private void readNextChunk() throws IOException {
+            buf = !buf;
+            size = is.read(buffer());
+            available = buffer().length == size;
+            offset = position;
+        }
+
+        public void readUpTo(byte b, DataConsumer consumer) throws IOException {
+            long start = position;
+            int p = toInt(position - offset);
+            while (true) {
+                if (p >= size) {
+                    readNextChunk();
+                    p = 0;
+                }
+
+                if (buffer()[p] == b) {
+                    break;
+                }
+                p++;
+                position++;
+            }
+            long end = position;
+
+            if (start >= offset) {
+                consumer.consume(buffer(), toInt(start - offset), toInt(end - offset));
+            } else {
+                var data = new byte[toInt(end - start)];
+                int sizeInNew = toInt(position - offset);
+                int sizeInPrevious = data.length - sizeInNew;
+
+                System.arraycopy(previous(), previous().length - sizeInPrevious, data, 0, sizeInPrevious);
+                System.arraycopy(buffer(), 0, data, sizeInPrevious, sizeInNew);
+                consumer.consume(data, 0, data.length);
+            }
+            position++;
+        }
+
+        @Override
+        public void close() throws IOException {
+            is.close();
+        }
+    }
+
+    @FunctionalInterface
+    private interface DataConsumer {
+        void consume(byte[] data, int from, int to);
+    }
+
     private static class Aggregator {
-        private double min = Double.MAX_VALUE;
-        private double max = Double.MIN_VALUE;
-        private double sum = 0;
+        private int min = Integer.MAX_VALUE;
+        private int max = Integer.MIN_VALUE;
+        private long sum = 0;
         private int total = 0;
 
-        public void add(double value) {
+        public void add(int value) {
             if (value < min) {
                 min = value;
             }
@@ -47,11 +151,11 @@ public class CalculateAverage_idegtiarenko {
         }
 
         public String toString() {
-            return round(min) + "/" + round(sum / total) + "/" + round(max);
+            return round(min) + "/" + round(1.0 * sum / total) + "/" + round(max);
         }
 
         private double round(double value) {
-            return Math.round(value * 10.0) / 10.0;
+            return Math.round(value) / 10.0;
         }
     }
 }
