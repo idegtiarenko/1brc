@@ -15,7 +15,6 @@
  */
 package dev.morling.onebrc;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.io.UncheckedIOException;
@@ -35,15 +34,14 @@ public class CalculateAverage_idegtiarenko {
 
     public static void main(String[] args) throws IOException {
 
-        final var fileSize = new File(FILE).length();
-        final var processors = Runtime.getRuntime().availableProcessors();
-        final var maxChunkSize = Integer.MAX_VALUE - MARGIN;//mmap size limit
-        final var chunks = Math.toIntExact(Math.max(processors, fileSize / maxChunkSize));
-        final var chunkSize = Math.ceilDiv(fileSize, chunks);
-
-        var measurements = new AtomicReferenceArray<Map<Station, Aggregator>>(chunks);
-
         try (var channel = new RandomAccessFile(FILE, "r").getChannel()) {
+            final var fileSize = channel.size();
+            final var processors = Runtime.getRuntime().availableProcessors();
+            final var maxChunkSize = Integer.MAX_VALUE - MARGIN;//mmap size limit
+            final var chunks = Math.toIntExact(Math.max(processors, fileSize / maxChunkSize));
+            final var chunkSize = Math.ceilDiv(fileSize, chunks);
+
+            var measurements = new AtomicReferenceArray<Map<Station, Aggregator>>(chunks);
             IntStream.range(0, chunks).parallel().forEach(chunk -> {
                 try {
                     var localMeasurements = new HashMap<Station, Aggregator>(1024);
@@ -61,9 +59,8 @@ public class CalculateAverage_idegtiarenko {
                     throw new UncheckedIOException(e);
                 }
             });
+            System.out.println(merge(measurements));
         }
-
-        System.out.println(merge(measurements));
     }
 
     private static class BufferReader {
@@ -107,9 +104,9 @@ public class CalculateAverage_idegtiarenko {
             return new Station(buf, hashCode);
         }
 
-        public short readMeasurementBefore(byte delimiter) {
+        public int readMeasurementBefore(byte delimiter) {
             boolean positive = true;
-            short value = 0;
+            int value = 0;
             if (buffer.get(p) == (byte) '-') {
                 positive = false;
                 p++;
@@ -122,8 +119,7 @@ public class CalculateAverage_idegtiarenko {
                 } else if (b == '.') {
                     continue;
                 } else {
-                    value *= 10;
-                    value += (short) (b - (byte) '0');
+                    value = 10 * value + (b - (byte) '0');
                 }
             }
             return positive ? value : (short) -value;
@@ -168,8 +164,8 @@ public class CalculateAverage_idegtiarenko {
     }
 
     private static class Aggregator {
-        private short min = Short.MAX_VALUE;
-        private short max = Short.MIN_VALUE;
+        private int min = Short.MAX_VALUE;
+        private int max = Short.MIN_VALUE;
         private long sum = 0;
         private int total = 0;
 
@@ -182,7 +178,7 @@ public class CalculateAverage_idegtiarenko {
             return result;
         }
 
-        public void add(short value) {
+        public void add(int value) {
             if (value < min) {
                 min = value;
             }
