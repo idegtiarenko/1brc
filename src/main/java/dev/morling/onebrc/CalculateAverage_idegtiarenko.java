@@ -15,55 +15,113 @@
  */
 package dev.morling.onebrc;
 
-import java.io.BufferedInputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.io.UncheckedIOException;
-import java.util.HashMap;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
+import java.sql.SQLOutput;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.stream.IntStream;
 
 public class CalculateAverage_idegtiarenko {
 
     private static final String FILE = "./measurements.txt";
+    private static final int MARGIN = 128;//margin to read a record if interrupted by a chunk position
 
     public static void main(String[] args) throws IOException {
 
-        var size = new File(FILE).length();
-        var chunks = Runtime.getRuntime().availableProcessors();
-        var chunkSize = size / chunks;
-        var measurements = new AtomicReferenceArray<Map<String, Aggregator>>(chunks);
+        var measurements = new ConcurrentHashMap<String, Aggregator>(1024);
 
-        IntStream.range(0, chunks).parallel().forEach(chunk -> {
-            var m = new HashMap<String, Aggregator>(1024);
-            try (var is = new ChunkedInputStream(new BufferedInputStream(new FileInputStream(FILE), 10 * 1024 * 1024))) {
-                is.setRange(chunk * chunkSize, (chunk + 1) * chunkSize);
-                if (chunk != 0) {
-                    is.readUpTo((byte) '\n', (data, from, to) -> {
-                        // skip to the first starting position
-                    });
-                }
-                Aggregator[] aggregation = new Aggregator[1];
-                while (is.available()) {
-                    is.readUpTo((byte) ';', (data, from, to) -> {
-                        aggregation[0] = m.computeIfAbsent(new String(data, from, to - from), ignored -> new Aggregator());
-                    });
-                    is.readUpTo((byte) '\n', (data, from, to) -> {
-                        aggregation[0].add(parse(data, from, to));
-                    });
-                }
-                measurements.set(chunk, m);
-            }
-            catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
-        });
+        final var fileSize = new File(FILE).length();
+        final var processors = Runtime.getRuntime().availableProcessors();
+        final var maxChunkSize = Integer.MAX_VALUE - MARGIN;//mmap size limit
+        final var chunks = Math.toIntExact(Math.max(processors, fileSize / maxChunkSize));
+        final var chunkSize = Math.ceilDiv(fileSize, chunks);
 
-        System.out.println(merge(measurements));
+        try (var channel = new RandomAccessFile(FILE, "r").getChannel()) {
+            IntStream.range(0, chunks).parallel().forEach(chunk -> {
+                try {
+                    var reader = new BufferReader(channel, chunkSize, fileSize, chunk);
+                    if (chunk != 0) {
+                        reader.skipTo((byte) '\n');
+                    }
+                    while (reader.available()) {
+                        var station = reader.readStringBefore((byte) ';');
+                        var measurement = reader.readNumberBefore((byte) '\n');
+                        measurements.computeIfAbsent(station, ignored -> new Aggregator()).add(measurement);
+                    }
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+        }
+
+        System.out.println(new TreeMap<>(measurements));
+    }
+
+    private static class BufferReader {
+
+        private final MappedByteBuffer buffer;
+        private final int limit;
+        private int p = 0;
+
+        public BufferReader(FileChannel channel, long chunkSize, long fileSize, int chunk) throws IOException {
+            long start = chunk * chunkSize;
+            int length = Math.toIntExact(Math.min(chunkSize + MARGIN, fileSize - start));
+            this.buffer = channel.map(FileChannel.MapMode.READ_ONLY, start, length);
+            this.limit = Math.toIntExact(Math.min(chunkSize, fileSize - start));
+        }
+
+        public boolean available() {
+            return p < buffer.limit() && p <= limit;
+        }
+
+        public void skipTo(byte delimiter) {
+            while (buffer.get(p) != delimiter) {
+                p++;
+            }
+            p++;// skip delimiter
+        }
+
+        public String readStringBefore(byte delimiter) {
+            int from = p;
+            while (buffer.get(p) != delimiter) {
+                p++;
+            }
+            int to = p;
+            p++;// skip delimiter
+            var buf = new byte[to - from];
+            buffer.get(from, buf, 0, to - from);
+            return new String(buf);
+        }
+
+        public int readNumberBefore(byte delimiter) {
+            boolean positive = true;
+            int value = 0;
+            if (buffer.get(p) == (byte) '-') {
+                positive = false;
+                p++;
+            }
+            while (true) {
+                byte b = buffer.get(p);
+                p++;
+                if (b == delimiter) {
+                    break;
+                } else if (b == '.') {
+                    continue;
+                } else {
+                    value = 10 * value + (b - (byte) '0');
+                }
+            }
+            return positive ? value : - value;
+        }
     }
 
     private static Map<String, Aggregator> merge(AtomicReferenceArray<Map<String, Aggregator>> results) {
@@ -74,118 +132,6 @@ public class CalculateAverage_idegtiarenko {
             }
         }
         return result;
-    }
-
-    private static int parse(byte[] data, int from, int to) {
-        boolean negative = false;
-        int p = from;
-        int value = 0;
-        if (data[from] == (byte) '-') {
-            p++;
-            negative = true;
-        }
-        while (p < to) {
-            if (data[p] != '.') {
-                value = 10 * value + (data[p] - (byte) '0');
-            }
-            p++;
-        }
-        return negative ? -value : value;
-    }
-
-    private static int toInt(long value) {
-        return (int) value;
-    }
-
-    private static final class ChunkedInputStream implements AutoCloseable {
-
-        private static final int BUFFER_SIZE = 1024 * 1024;
-
-        private final InputStream is;
-
-        private final byte[] b2 = new byte[BUFFER_SIZE];
-        private final byte[] b1 = new byte[BUFFER_SIZE];
-
-        private boolean buf = false;
-
-        private long offset = 0;
-        private int size = 0;
-        private long position;
-        private long limit = Long.MAX_VALUE;
-
-        private boolean available = true;
-
-        public ChunkedInputStream(InputStream is) {
-            this.is = is;
-        }
-
-        public void setRange(long from, long to) throws IOException {
-            is.skip(from);
-            offset = from;
-            position = from;
-            limit = to;
-        }
-
-        public boolean available() {
-            return available && position < limit;
-        }
-
-        private byte[] buffer() {
-            return buf ? b1 : b2;
-        }
-
-        private byte[] previous() {
-            return !buf ? b1 : b2;
-        }
-
-        private void readNextChunk() throws IOException {
-            buf = !buf;
-            size = is.read(buffer());
-            available = buffer().length != 0;
-            offset = position;
-        }
-
-        public void readUpTo(byte b, DataConsumer consumer) throws IOException {
-            long start = position;
-            int p = toInt(position - offset);
-            while (true) {
-                if (p >= size) {
-                    readNextChunk();
-                    p = 0;
-                }
-
-                if (buffer()[p] == b) {
-                    break;
-                }
-                p++;
-                position++;
-            }
-            long end = position;
-
-            if (start >= offset) {
-                consumer.consume(buffer(), toInt(start - offset), toInt(end - offset));
-            }
-            else {
-                var data = new byte[toInt(end - start)];
-                int sizeInNew = toInt(position - offset);
-                int sizeInPrevious = data.length - sizeInNew;
-
-                System.arraycopy(previous(), previous().length - sizeInPrevious, data, 0, sizeInPrevious);
-                System.arraycopy(buffer(), 0, data, sizeInPrevious, sizeInNew);
-                consumer.consume(data, 0, data.length);
-            }
-            position++;
-        }
-
-        @Override
-        public void close() throws IOException {
-            is.close();
-        }
-    }
-
-    @FunctionalInterface
-    private interface DataConsumer {
-        void consume(byte[] data, int from, int to);
     }
 
     private static class Aggregator {
@@ -203,7 +149,7 @@ public class CalculateAverage_idegtiarenko {
             return result;
         }
 
-        public void add(int value) {
+        public synchronized void add(int value) {
             if (value < min) {
                 min = value;
             }
