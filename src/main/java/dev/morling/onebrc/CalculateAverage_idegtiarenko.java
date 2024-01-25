@@ -1,3 +1,18 @@
+/*
+ *  Copyright 2023 The original authors
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
 package dev.morling.onebrc;
 
 import java.io.BufferedInputStream;
@@ -39,7 +54,8 @@ public class CalculateAverage_idegtiarenko {
                         aggregation[0].add(parse(data, from, to));
                     });
                 }
-            } catch (IOException e) {
+            }
+            catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
         });
@@ -70,7 +86,7 @@ public class CalculateAverage_idegtiarenko {
 
     private static final class ChunkedInputStream implements AutoCloseable {
 
-        private static final int BUFFER_SIZE = 1024*1024;
+        private static final int BUFFER_SIZE = 1024 * 1024;
 
         private final InputStream is;
 
@@ -135,7 +151,8 @@ public class CalculateAverage_idegtiarenko {
 
             if (start >= offset) {
                 consumer.consume(buffer(), toInt(start - offset), toInt(end - offset));
-            } else {
+            }
+            else {
                 var data = new byte[toInt(end - start)];
                 int sizeInNew = toInt(position - offset);
                 int sizeInPrevious = data.length - sizeInNew;
