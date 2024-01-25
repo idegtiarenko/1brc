@@ -21,10 +21,11 @@ import java.io.UncheckedIOException;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
 import java.util.stream.IntStream;
 
 public class CalculateAverage_idegtiarenko {
@@ -41,10 +42,10 @@ public class CalculateAverage_idegtiarenko {
             final var chunks = Math.toIntExact(Math.max(processors, fileSize / maxChunkSize));
             final var chunkSize = Math.ceilDiv(fileSize, chunks);
 
-            var measurements = new AtomicReferenceArray<Map<Station, Aggregator>>(chunks);
+            var measurements = new AtomicReferenceArray<SimpleMap>(chunks);
             IntStream.range(0, chunks).parallel().forEach(chunk -> {
                 try {
-                    var localMeasurements = new HashMap<Station, Aggregator>(1024);
+                    var localMeasurements = new SimpleMap(4096);
                     var reader = new BufferReader(channel, chunkSize, fileSize, chunk);
                     if (chunk != 0) {
                         reader.skipTo((byte) '\n');
@@ -63,7 +64,7 @@ public class CalculateAverage_idegtiarenko {
         }
     }
 
-    private static class BufferReader {
+    private static final class BufferReader {
 
         private final MappedByteBuffer buffer;
         private final int limit;
@@ -88,20 +89,12 @@ public class CalculateAverage_idegtiarenko {
         }
 
         public Station readStationBefore(byte delimiter) {
-            int hashCode = 0;
             int from = p;
-            while (true) {
-                var b = buffer.get(p);
-                p++;
-                if (b == delimiter) {
-                    break;
-                }
-                hashCode = hashCode * 31 + b;
-            }
+            skipTo(delimiter);
             int to = p - 1;
             var buf = new byte[to - from];
             buffer.get(from, buf, 0, to - from);
-            return new Station(buf, hashCode);
+            return new Station(buf, Arrays.hashCode(buf));
         }
 
         public int readMeasurementBefore(byte delimiter) {
@@ -126,17 +119,17 @@ public class CalculateAverage_idegtiarenko {
         }
     }
 
-    private static Map<String, Aggregator> merge(AtomicReferenceArray<Map<Station, Aggregator>> results) {
+    private static Map<String, Aggregator> merge(AtomicReferenceArray<SimpleMap> results) {
         var result = new TreeMap<String, Aggregator>();
         for (int i = 0; i < results.length(); i++) {
-            for (var entry : results.get(i).entrySet()) {
-                result.merge(entry.getKey().toString(), entry.getValue(), Aggregator::merge);
-            }
+            results.get(i).forEach((key, value) -> {
+                result.merge(key.toString(), value, Aggregator::merge);
+            });
         }
         return result;
     }
 
-    private static class Station {
+    private static final class Station {
         private final byte[] bytes;
         private final int hashCode;
 
@@ -145,16 +138,8 @@ public class CalculateAverage_idegtiarenko {
             this.hashCode = hashCode;
         }
 
-        @Override
-        public boolean equals(Object o) {
-            if (this == o) return true;
-            if (o == null || getClass() != o.getClass()) return false;
-            return Arrays.equals(bytes, ((Station) o).bytes);
-        }
-
-        @Override
-        public int hashCode() {
-            return hashCode;
+        public static boolean equals(Station a, Station b) {
+            return Arrays.equals(a.bytes, b.bytes);
         }
 
         @Override
@@ -163,7 +148,7 @@ public class CalculateAverage_idegtiarenko {
         }
     }
 
-    private static class Aggregator {
+    private static final class Aggregator {
         private int min = Short.MAX_VALUE;
         private int max = Short.MIN_VALUE;
         private long sum = 0;
@@ -171,8 +156,8 @@ public class CalculateAverage_idegtiarenko {
 
         public static Aggregator merge(Aggregator a, Aggregator b) {
             var result = new Aggregator();
-            result.min = a.min < b.min ? a.min : b.min;
-            result.max = a.max > b.max ? a.max : b.max;
+            result.min = Math.min(a.min, b.min);
+            result.max = Math.max(a.max, b.max);
             result.sum = a.sum + b.sum;
             result.total = a.total + b.total;
             return result;
@@ -195,6 +180,39 @@ public class CalculateAverage_idegtiarenko {
 
         private double round(double value) {
             return Math.round(value) / 10.0;
+        }
+    }
+
+    private static final class SimpleMap {
+        private final int size;
+        private final Station[] keys;
+        private final Aggregator[] values;
+
+        public SimpleMap(int size) {
+            this.size = size;
+            this.keys = new Station[size];
+            this.values = new Aggregator[size];
+        }
+
+        public Aggregator computeIfAbsent(Station key, Function<Station, Aggregator> mappingFunction) {
+            var cell = key.hashCode & (size - 1);
+            Station found = null;
+            while ((found = keys[cell]) != null && !Station.equals(key, found)) {
+                cell++;
+            }
+            if (found == null) {
+                keys[cell] = key;
+                values[cell] = mappingFunction.apply(key);
+            }
+            return values[cell];
+        }
+
+        public void forEach(BiConsumer<Station, Aggregator> consumer) {
+            for (int i = 0; i < size; i++) {
+                if (keys[i] != null) {
+                    consumer.accept(keys[i], values[i]);
+                }
+            }
         }
     }
 }
