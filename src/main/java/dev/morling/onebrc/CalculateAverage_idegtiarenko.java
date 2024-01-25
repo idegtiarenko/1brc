@@ -101,9 +101,9 @@ public class CalculateAverage_idegtiarenko {
             return new String(buf);
         }
 
-        public int readNumberBefore(byte delimiter) {
+        public short readNumberBefore(byte delimiter) {
             boolean positive = true;
-            int value = 0;
+            short value = 0;
             if (buffer.get(p) == (byte) '-') {
                 positive = false;
                 p++;
@@ -116,10 +116,11 @@ public class CalculateAverage_idegtiarenko {
                 } else if (b == '.') {
                     continue;
                 } else {
-                    value = 10 * value + (b - (byte) '0');
+                    value *= 10;
+                    value += (short) (b - (byte) '0');
                 }
             }
-            return positive ? value : - value;
+            return positive ? value : (short) -value;
         }
     }
 
@@ -134,21 +135,21 @@ public class CalculateAverage_idegtiarenko {
     }
 
     private static class Aggregator {
-        private int min = Integer.MAX_VALUE;
-        private int max = Integer.MIN_VALUE;
+        private short min = Short.MAX_VALUE;
+        private short max = Short.MIN_VALUE;
         private long sum = 0;
         private int total = 0;
 
         public static Aggregator merge(Aggregator a, Aggregator b) {
             var result = new Aggregator();
-            result.min = Math.min(a.min, b.min);
-            result.max = Math.max(a.max, b.max);
+            result.min = a.min < b.min ? a.min : b.min;
+            result.max = a.max > b.max ? a.max : b.max;
             result.sum = a.sum + b.sum;
             result.total = a.total + b.total;
             return result;
         }
 
-        public synchronized void add(int value) {
+        public void add(short value) {
             if (value < min) {
                 min = value;
             }
