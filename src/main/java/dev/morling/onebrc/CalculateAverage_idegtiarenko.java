@@ -21,6 +21,7 @@ import java.io.RandomAccessFile;
 import java.io.UncheckedIOException;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
@@ -40,19 +41,19 @@ public class CalculateAverage_idegtiarenko {
         final var chunks = Math.toIntExact(Math.max(processors, fileSize / maxChunkSize));
         final var chunkSize = Math.ceilDiv(fileSize, chunks);
 
-        var measurements = new AtomicReferenceArray<Map<String, Aggregator>>(chunks);
+        var measurements = new AtomicReferenceArray<Map<Station, Aggregator>>(chunks);
 
         try (var channel = new RandomAccessFile(FILE, "r").getChannel()) {
             IntStream.range(0, chunks).parallel().forEach(chunk -> {
                 try {
-                    var localMeasurements = new HashMap<String, Aggregator>(1024);
+                    var localMeasurements = new HashMap<Station, Aggregator>(1024);
                     var reader = new BufferReader(channel, chunkSize, fileSize, chunk);
                     if (chunk != 0) {
                         reader.skipTo((byte) '\n');
                     }
                     while (reader.available()) {
-                        var station = reader.readStringBefore((byte) ';');
-                        var measurement = reader.readNumberBefore((byte) '\n');
+                        var station = reader.readStationBefore((byte) ';');
+                        var measurement = reader.readMeasurementBefore((byte) '\n');
                         localMeasurements.computeIfAbsent(station, ignored -> new Aggregator()).add(measurement);
                     }
                     measurements.set(chunk, localMeasurements);
@@ -89,19 +90,24 @@ public class CalculateAverage_idegtiarenko {
             p++;// skip delimiter
         }
 
-        public String readStringBefore(byte delimiter) {
+        public Station readStationBefore(byte delimiter) {
+            int hashCode = 0;
             int from = p;
-            while (buffer.get(p) != delimiter) {
+            while (true) {
+                var b = buffer.get(p);
                 p++;
+                if (b == delimiter) {
+                    break;
+                }
+                hashCode = hashCode * 31 + b;
             }
-            int to = p;
-            p++;// skip delimiter
+            int to = p - 1;
             var buf = new byte[to - from];
             buffer.get(from, buf, 0, to - from);
-            return new String(buf);
+            return new Station(buf, hashCode);
         }
 
-        public short readNumberBefore(byte delimiter) {
+        public short readMeasurementBefore(byte delimiter) {
             boolean positive = true;
             short value = 0;
             if (buffer.get(p) == (byte) '-') {
@@ -124,14 +130,41 @@ public class CalculateAverage_idegtiarenko {
         }
     }
 
-    private static Map<String, Aggregator> merge(AtomicReferenceArray<Map<String, Aggregator>> results) {
+    private static Map<String, Aggregator> merge(AtomicReferenceArray<Map<Station, Aggregator>> results) {
         var result = new TreeMap<String, Aggregator>();
         for (int i = 0; i < results.length(); i++) {
             for (var entry : results.get(i).entrySet()) {
-                result.merge(entry.getKey(), entry.getValue(), Aggregator::merge);
+                result.merge(entry.getKey().toString(), entry.getValue(), Aggregator::merge);
             }
         }
         return result;
+    }
+
+    private static class Station {
+        private final byte[] bytes;
+        private final int hashCode;
+
+        public Station(byte[] bytes, int hashCode) {
+            this.bytes = bytes;
+            this.hashCode = hashCode;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            return Arrays.equals(bytes, ((Station) o).bytes);
+        }
+
+        @Override
+        public int hashCode() {
+            return hashCode;
+        }
+
+        @Override
+        public String toString() {
+            return new String(bytes);
+        }
     }
 
     private static class Aggregator {
