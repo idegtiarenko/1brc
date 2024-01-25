@@ -21,8 +21,10 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.TreeMap;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.stream.IntStream;
 
 public class CalculateAverage_idegtiarenko {
@@ -34,10 +36,10 @@ public class CalculateAverage_idegtiarenko {
         var size = new File(FILE).length();
         var chunks = Runtime.getRuntime().availableProcessors();
         var chunkSize = size / chunks;
-
-        var measurements = new ConcurrentHashMap<String, Aggregator>(1024);
+        var measurements = new AtomicReferenceArray<Map<String, Aggregator>>(chunks);
 
         IntStream.range(0, chunks).parallel().forEach(chunk -> {
+            var m = new HashMap<String, Aggregator>(1024);
             try (var is = new ChunkedInputStream(new BufferedInputStream(new FileInputStream(FILE), 10 * 1024 * 1024))) {
                 is.setRange(chunk * chunkSize, (chunk + 1) * chunkSize);
                 if (chunk != 0) {
@@ -48,19 +50,30 @@ public class CalculateAverage_idegtiarenko {
                 Aggregator[] aggregation = new Aggregator[1];
                 while (is.available()) {
                     is.readUpTo((byte) ';', (data, from, to) -> {
-                        aggregation[0] = measurements.computeIfAbsent(new String(data, from, to - from), ignored -> new Aggregator());
+                        aggregation[0] = m.computeIfAbsent(new String(data, from, to - from), ignored -> new Aggregator());
                     });
                     is.readUpTo((byte) '\n', (data, from, to) -> {
                         aggregation[0].add(parse(data, from, to));
                     });
                 }
+                measurements.set(chunk, m);
             }
             catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
         });
 
-        System.out.println(new TreeMap<>(measurements));
+        System.out.println(merge(measurements));
+    }
+
+    private static Map<String, Aggregator> merge(AtomicReferenceArray<Map<String, Aggregator>> results) {
+        var result = new TreeMap<String, Aggregator>();
+        for (int i = 0; i < results.length(); i++) {
+            for (var entry : results.get(i).entrySet()) {
+                result.merge(entry.getKey(), entry.getValue(), Aggregator::merge);
+            }
+        }
+        return result;
     }
 
     private static int parse(byte[] data, int from, int to) {
@@ -181,7 +194,16 @@ public class CalculateAverage_idegtiarenko {
         private long sum = 0;
         private int total = 0;
 
-        public synchronized void add(int value) {
+        public static Aggregator merge(Aggregator a, Aggregator b) {
+            var result = new Aggregator();
+            result.min = Math.min(a.min, b.min);
+            result.max = Math.max(a.max, b.max);
+            result.sum = a.sum + b.sum;
+            result.total = a.total + b.total;
+            return result;
+        }
+
+        public void add(int value) {
             if (value < min) {
                 min = value;
             }
