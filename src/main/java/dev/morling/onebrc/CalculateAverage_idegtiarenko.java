@@ -17,16 +17,13 @@ package dev.morling.onebrc;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.io.UncheckedIOException;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
-import java.sql.SQLOutput;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.stream.IntStream;
 
@@ -37,17 +34,18 @@ public class CalculateAverage_idegtiarenko {
 
     public static void main(String[] args) throws IOException {
 
-        var measurements = new ConcurrentHashMap<String, Aggregator>(1024);
-
         final var fileSize = new File(FILE).length();
         final var processors = Runtime.getRuntime().availableProcessors();
         final var maxChunkSize = Integer.MAX_VALUE - MARGIN;//mmap size limit
         final var chunks = Math.toIntExact(Math.max(processors, fileSize / maxChunkSize));
         final var chunkSize = Math.ceilDiv(fileSize, chunks);
 
+        var measurements = new AtomicReferenceArray<Map<String, Aggregator>>(chunks);
+
         try (var channel = new RandomAccessFile(FILE, "r").getChannel()) {
             IntStream.range(0, chunks).parallel().forEach(chunk -> {
                 try {
+                    var localMeasurements = new HashMap<String, Aggregator>(1024);
                     var reader = new BufferReader(channel, chunkSize, fileSize, chunk);
                     if (chunk != 0) {
                         reader.skipTo((byte) '\n');
@@ -55,15 +53,16 @@ public class CalculateAverage_idegtiarenko {
                     while (reader.available()) {
                         var station = reader.readStringBefore((byte) ';');
                         var measurement = reader.readNumberBefore((byte) '\n');
-                        measurements.computeIfAbsent(station, ignored -> new Aggregator()).add(measurement);
+                        localMeasurements.computeIfAbsent(station, ignored -> new Aggregator()).add(measurement);
                     }
+                    measurements.set(chunk, localMeasurements);
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
             });
         }
 
-        System.out.println(new TreeMap<>(measurements));
+        System.out.println(merge(measurements));
     }
 
     private static class BufferReader {
