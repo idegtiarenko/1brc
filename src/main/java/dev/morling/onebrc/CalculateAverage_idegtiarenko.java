@@ -141,7 +141,7 @@ public class CalculateAverage_idegtiarenko {
         private void readNextChunk() throws IOException {
             buf = !buf;
             size = is.read(buffer());
-            available = buffer().length == size;
+            available = buffer().length != 0;
             offset = position;
         }
 
